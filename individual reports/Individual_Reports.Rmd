@@ -1,0 +1,666 @@
+---
+title: Case and Contact Metrics, `r stringr::str_remove_all(str_c(format(floor_date(Sys.Date(),"week")-7,"%m/%d/%y")," - ",format(ceiling_date(Sys.Date(),"week")-8,"%m/%d/%y")),"^|(?<=/)0")`
+author: Generated for `r .x`
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float: 
+      collapsed: false
+knit: (function(input,...) {
+    rmarkdown::render(
+      input,
+      output_file = stringr::str_c(
+        xfun::sans_ext(input),"_",
+        stringr::str_remove_all(format(Sys.Date(),"%m.%d"),"^0|(?<=/)0"),".html"
+      ),
+      output_dir = dirname(dirname(rstudioapi::getSourceEditorContext()$path))
+    )
+  })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## Load required packages
+## First time need to run tinytex::install_tinytex()
+library(odbc)
+library(dbplyr)
+library(DBI)
+library(tidyverse)
+library(lubridate)
+library(Hmisc)
+library(tinytex)
+library(gt)
+
+## Connect to PCC SQL Server database
+con <- dbConnect(odbc(),
+                 Driver = "SQL Server",
+                 Server = "EHRALIPSQLRPT",
+                 Database = "hlt_mpi_index",
+                 Port = 1433)
+
+
+.x = 'Rachel Shifman'
+
+date_variable = interview_complete_date
+
+## Connect to patient table and create formatted df
+pt_phila = tbl(con,in_schema("pcc","patient")) %>% 
+  select(id,cdms_id,address_city,interview_disposition,final_disposition,current_status,assigned_to_primary_name,date_opened,interview_date,has_phone_number,phone_home) %>%
+  collect() %>% 
+  # format date_opened variable in correct time zone
+  mutate(date_opened = with_tz(as_datetime(date_opened),tzone=Sys.timezone()),
+         across(contains("date"),~as_date(.)),
+    # create recoded case assigned field - Checks if the case is assigned 
+    assigned_recode_pt = case_when(
+      !is.na(assigned_to_primary_name) ~ "yes",
+      TRUE ~ "no"
+    ),
+    # create variable representing current week, last week, 2 weeks ago, 3+ weeks ago
+    timeframe = case_when(
+      (epiweek(interview_date) == epiweek(Sys.Date())|epiweek(date_opened) == epiweek(Sys.Date())) & year(interview_date)==year(Sys.Date()) ~ "current_week",
+      (epiweek(interview_date) == epiweek(Sys.Date())-1|epiweek(date_opened) == epiweek(Sys.Date())-1) & year(interview_date)==year(Sys.Date()) ~ "last_week",
+      (epiweek(interview_date) == epiweek(Sys.Date())-2|epiweek(date_opened) == epiweek(Sys.Date())-2) & year(interview_date)==year(Sys.Date()) ~ "two_weeks",
+      (epiweek(interview_date) == epiweek(Sys.Date())-3|epiweek(date_opened) == epiweek(Sys.Date())-3) & year(interview_date)==year(Sys.Date()) ~ "three_weeks",
+      TRUE ~ "four_plus"
+    # create recoded field based on interview/final dispositions
+    ), interview_disp_recode_pt = factor(case_when(
+           final_disposition == "delayed_result" ~ "Closed Cases - Delayed Lab Result",
+           final_disposition == "reached_completed_refused_contacts" ~ "Completed Interview - Refused Contacts",
+           (str_detect(interview_disposition,"agreed|verified|partial|already")|final_disposition == "reached_completed") ~ "Completed Interview",
+           interview_disposition == "refused_participation" ~ "Refused Interview",
+           (has_phone_number == "no"|!str_detect(phone_home,"^\\d{10}$")|phone_home=="9999999999"|interview_disposition == "invalid_phone_number") ~ "Cannot be Assigned",
+           (interview_disposition %in% c("no_attempt","")|is.na(interview_disposition)) & (assigned_recode_pt == "yes") & (current_status == "open") ~ "Interview Not Attempted",
+           str_detect(interview_disposition,"med_|incarcerated|deceased|language") ~ "Reached - Not Interviewed",
+           str_detect(interview_disposition,"attempted|voicemail")|final_disposition == "unreachable" ~ "Attempted - Unreached",
+           interview_disposition == "additional_outreach_needed"|final_disposition == "reached_not_completed" ~ "Interview In Progress",
+           final_disposition ==   ~ "Closed Cases - Staffing Capacity",
+           assigned_recode_pt == "no" & current_status == "open" ~ "Need to be Assigned",
+           TRUE ~ "Interview Not Attempted"
+           ),levels = c("Completed Interview","Completed Interview - Refused Contacts","Refused Interview","Attempted - Unreached","Reached - Not Interviewed","Interview In Progress","Interview Not Attempted","Need to be Assigned","Cannot be Assigned","Closed Cases - Delayed Lab Result","Closed Cases - Staffing Capacity"))) %>%  
+  # filter to cases assigned to case investigator (represented by .x)
+  # .x is from map() function in Individual_Reports.R script
+  filter(assigned_to_primary_name == .x)
+
+
+## Connect to contact table and create formatted df
+ct_phila = tbl(con,in_schema("pcc","contact")) %>% 
+  select(id,fup_active,fup_end_date,fup_method_preferred_display,address_city,ooj,full_name,assigned_to_primary_name,interview_disposition,final_disposition,current_status,interview_date,date_opened,has_phone_number,phone_home) %>% 
+  collect() %>% 
+  # format date_opened variable in correct time zone
+  mutate(date_opened = with_tz(as_datetime(date_opened),tzone=Sys.timezone()),
+         across(contains("date"),~as_date(.)),
+         # create recoded case assigned field
+         assigned_recode_ct = case_when(
+           assigned_to_primary_name %nin% c("---","") ~ "yes",
+           TRUE ~ "no"
+         ),
+         # create variable representing current week, last week, 2 weeks ago, 3+ weeks ago
+         timeframe = case_when(
+           (epiweek(interview_date) == epiweek(Sys.Date())|epiweek(date_opened) == epiweek(Sys.Date())) & year(interview_date)==year(Sys.Date()) ~ "current_week",
+      (epiweek(interview_date) == epiweek(Sys.Date())-1|epiweek(date_opened) == epiweek(Sys.Date())-1) & year(interview_date)==year(Sys.Date()) ~ "last_week",
+      (epiweek(interview_date) == epiweek(Sys.Date())-2|epiweek(date_opened) == epiweek(Sys.Date())-2) & year(interview_date)==year(Sys.Date()) ~ "two_weeks",
+      (epiweek(interview_date) == epiweek(Sys.Date())-3|epiweek(date_opened) == epiweek(Sys.Date())-3) & year(interview_date)==year(Sys.Date()) ~ "three_weeks",
+      TRUE ~ "four_plus"
+         ),
+      # create recoded field based on interview/final dispositions
+      interview_disp_recode_ct = factor(case_when(
+           has_phone_number == "no" ~ "Cannot be Assigned",
+           (interview_disposition == "no_attempt"|is.na(interview_disposition)) & (assigned_recode_ct == "yes") ~ "Interview Not Attempted",
+           final_disposition == "reached_refused_fup" ~ "Completed Interview - Refused Follow-up",
+           str_detect(interview_disposition,"agreed|verified|partial|already")|final_disposition == "followup_completed" ~ "Completed Interview",
+           interview_disposition == "refused_participation" ~ "Refused Interview",
+           str_detect(interview_disposition,"attempted|voicemail|med_|incarcerated|deceased|invalid|language")|final_disposition == "unreachable" ~ "Attempted Interview - Unreached",
+           interview_disposition == "additional_outreach_needed"|final_disposition == "reached_interview_not_done" ~ "Interview In Progress",
+      TRUE ~ "Need to be Assigned"
+    ),levels = c("Completed Interview","Completed Interview - Refused Follow-up","Refused Interview","Attempted Interview - Unreached","Interview In Progress","Interview Not Attempted","Need to be Assigned","Cannot be Assigned")),
+    # create variable that indicates whether contact is currently in follow-up period
+    fup_current = factor(case_when(
+           fup_active == "yes" & fup_end_date >= Sys.Date() & (current_status == "open"|is.na(current_status)) & is.na(final_disposition) ~ "yes",
+           TRUE ~ "no"
+         ))) %>%  
+  # filter out test contact records
+  filter(!str_detect(full_name,"SMS|Test|Contact|Daily Survey") &
+         # filter to cases assigned to case investigator (represented by .x)
+         # .x is from map() function in Individual_Reports.R script
+         assigned_to_primary_name == .x)
+
+
+
+## Create date ranges for dynamic labels in table 2
+current_week = str_c(str_remove_all(format(floor_date(Sys.Date(),"week"),"%m/%d"),"0(?=\\d)"),"-Today")
+last_week = str_remove_all(str_c(format(floor_date(Sys.Date(),"week")-7,"%m/%d"),"-",format(ceiling_date(Sys.Date(),"week")-8,"%m/%d")),"0(?=\\d)")
+two_weeks_ago = str_remove_all(str_c(format(floor_date(Sys.Date(),"week")-14,"%m/%d"),"-",format(ceiling_date(Sys.Date(),"week")-15,"%m/%d")),"0(?=\\d)")
+three_weeks_ago = str_remove_all(str_c(format(floor_date(Sys.Date(),"week")-21,"%m/%d"),"-",format(ceiling_date(Sys.Date(),"week")-22,"%m/%d")),"0(?=\\d)")
+
+## Setup for table 5
+startDate <- floor_date(Sys.Date()-7,"week")
+endDate <- ceiling_date(Sys.Date()-8,"week")
+
+pt_assigned = tbl(con,in_schema("pcc","patient")) %>%
+  select(interview_date, date_opened, assigned_to_primary_name, number_contacts_total, number_contacts_not_registered) %>%
+  collect() %>%
+  mutate(date_opened = as_date(date_opened)) %>%
+  ## Filter to cases interviewed during last epiweek and current year
+  filter(date_opened >= startDate) %>%
+  filter(date_opened < endDate) %>%
+  filter(## Filter out cases not assigned to CI
+    !is.na(assigned_to_primary_name),
+    assigned_to_primary_name != "")
+
+t1 <- pt_assigned %>%
+  filter(assigned_to_primary_name == .x) %>%
+  mutate(number_contacts_total = as.numeric(number_contacts_total)) %>%
+  mutate(number_contacts_not_registered = as.numeric(number_contacts_not_registered))
+
+t1 <- select(t1, -c(assigned_to_primary_name, interview_date))
+colnames(t1)[2:3] <- c('Reported Total Contacts', 'Contacts Not Registered')
+t1[is.na(t1)] <- 0
+t1 <- t1 %>%
+  group_by(date_opened) %>%
+  summarise(across(everything(), sum))
+
+num_registered_contacts <- t1 %>% mutate(registered = `Reported Total Contacts` - `Contacts Not Registered`)
+num_registered_contacts <- colSums(num_registered_contacts!=0)[[4]]
+
+t2 <-  ct_assigned %>%
+  filter(assigned_to_primary_name == .x) %>%
+  select(interview_date, date_opened, assigned_to_primary_name) %>%
+  collect() %>%
+  mutate(interview_date = as_date(interview_date)) %>%
+  mutate(date_opened = as_date(date_opened)) %>%
+  ## Filter to cases interviewed during last epiweek and current year
+  filter(date_opened >= startDate) %>%
+  filter(date_opened < endDate) %>%
+  filter(## Filter out cases not assigned to CI
+    !is.na(assigned_to_primary_name),
+    assigned_to_primary_name != "")
+t2 <- t2 %>% count(assigned_to_primary_name, date_opened)
+t2 <- select(t2, -c(assigned_to_primary_name))
+colnames(t2)[1:2] <- c('date_opened', 'Contacts Registered')
+
+t3 <- merge(x= t1, y= t2, by= 'date_opened', all = TRUE)
+t3[is.na(t3)] <- 0
+t3 <- t3 %>% mutate("Total Summed Contacts" = `Contacts Registered` + `Contacts Not Registered`)
+t3 <- t3[c('date_opened', 'Contacts Registered', 'Contacts Not Registered', 'Total Summed Contacts', 'Reported Total Contacts')]
+
+
+if (nrow(t3) == 0) {
+  t3<-data.frame(matrix(0, 1, 5))
+  colnames(t3) <- c('date_opened', 'Contacts Registered', 'Contacts Not Registered', 'Total Summed Contacts', 'Reported Total Contacts')
+}
+t3[is.na(t3)] <- 0
+
+pt_assigned = tbl(con,in_schema("pcc","patient")) %>%
+  select(interview_date, date_opened, assigned_to_primary_name, number_contacts_total, number_contacts_not_registered) %>%
+  collect() %>%
+  mutate(interview_date = as_date(interview_date)) %>%
+  ## Filter to cases interviewed during last epiweek and current year
+  filter(interview_date >= startDate) %>%
+  filter(interview_date < endDate) %>%
+  filter(## Filter out cases not assigned to CI
+    !is.na(assigned_to_primary_name),
+    assigned_to_primary_name != "")
+
+cases <- pt_assigned %>% 
+  filter(assigned_to_primary_name == .x)
+
+refused_contacts <- pt_phila %>% 
+  filter(interview_date >= startDate) %>%
+  filter(interview_date < endDate)
+
+
+refused_contacts <- sum(refused_contacts$interview_disp_recode_pt == 'Completed Interview - Refused Contacts') + sum(refused_contacts$interview_disp_recode_pt == 'Refused Interview')   
+
+
+```
+***
+
+#### **Case Investigation**
+**Note:** Based on interview_date, **`r pt_phila %>% filter(epiweek(interview_date)==epiweek(Sys.Date())-1, year(interview_date)==year(Sys.Date())) %>% select(id) %>% n_distinct()`** cases were imported into PCC during the week of **`r str_remove_all(format(floor_date(Sys.Date(),"week")-7,"%m/%d/%y"),"^0|(?<=/)0")`** were assigned to **`r .x`**. Dates are **not shown** for days during which staff member had no cases assigned to them.
+
+<div style="margin-bottom:30px;">
+</div>
+
+##### **Table 1.** Case investigation interview outcomes
+
+```{r table1, echo=FALSE, results='asis',warning=FALSE}
+pt_phila %>%
+  # filter to cases from current week
+  filter(timeframe == "last_week") %>%
+  # sort based on interview date
+  arrange(interview_date) %>% 
+  # count number of completed, refused, attempted, etc. interviews by day
+  count(interview_date,interview_disp_recode_pt,.drop=FALSE) %>%
+  # pivot wider so that dates are column names
+  pivot_wider(names_from=interview_date,values_from=n) %>%
+  # format date column names to remove 0s and 
+  rename_with(~replace_na(str_remove_all(format(as_date(.),"%m/%d/%y"),"^0|(?<=/)0"),"Not Investigated"),-interview_disp_recode_pt) %>%
+  rowwise() %>% 
+  # calculate running total by summing across numeric columns
+  mutate("Running Total" = sum(c_across(where(is.numeric)),na.rm=TRUE)) %>% 
+  # convert table to gt table and convert first column to stub column
+  gt(
+    rowname_col = "interview_disp_recode_pt"
+  ) %>% 
+  # format missing values in all columns
+  fmt_missing(
+    columns = everything()
+  ) %>% 
+  # center columns
+  cols_align(
+    align = "center",
+    columns = contains("Running")
+  ) %>% 
+  # add label spanner above date columns
+  tab_spanner(
+    label = md("**Date Cases Interviewed**"),
+    columns = matches("\\d+")
+  ) %>% 
+  # create summary row of total cases assigned
+  grand_summary_rows(
+    columns = everything(),
+    fns = list(
+      `Total Cases Assigned` = ~sum(.,na.rm = TRUE)
+    ),
+    decimals = 0
+  ) %>% 
+  # color completed interview row green -- color stub and body rows separately
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "palegreen3")
+      ),
+    locations = cells_stub(rows = "Completed Interview")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "palegreen3"),
+    locations = cells_body(rows = "Completed Interview")
+  ) %>% 
+  # color not attempted interview row red -- color stub and body rows separately
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "darksalmon")
+      ),
+    locations = cells_stub(rows = "Interview Not Attempted")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "darksalmon"),
+    locations = cells_body(rows = "Interview Not Attempted")
+  ) %>%
+  # format table width, data padding, row formatting and coloring
+  tab_options(
+    table.width = pct(100),
+    data_row.padding = px(5),
+    row_group.font.weight = "bold",
+    grand_summary_row.background.color = "lightblue"
+  )
+```
+
+<div style="margin-bottom:30px;">
+</div>
+
+##### **Table 2.** Case investigation interview weekly totals. 
+**Note**: Weeks where staff member had no cases assigned will not show up.
+```{r table2, echo=FALSE, results='asis',warning=FALSE}
+pt_phila %>% 
+  filter(timeframe != "four_plus") %>% 
+  count(timeframe,interview_disp_recode_pt,.drop=FALSE) %>%
+  pivot_wider(names_from = timeframe,values_from=n) %>%
+  mutate_at(vars(contains("week")),funs("per" = ./sum(.))) %>% 
+  # rename edge cases where columns are not renamed correctly
+  { if("per" %in% names(.) & "current_week" %in% names(.))
+    rename(., "current_week_per" = per)
+    else .} %>% 
+  { if("per" %in% names(.) & "last_week" %in% names(.))
+    rename(., "last_week_per" = per)
+    else .} %>% 
+  # multiple columns containing "per" by 100
+  mutate(across(contains("per"), ~round(.*100,1))) %>%
+  # reorder columns
+  select(1,contains("current"),contains("last"),contains("two"),contains("three")) %>% 
+  # convert table to gt table and convert first column to stub column
+  gt(
+    rowname_col = "interview_disp_recode_pt"
+  ) %>% 
+  # format missing values in all columns
+  fmt_missing(
+    columns = everything()
+  ) %>% 
+  # center columns
+  cols_align(
+    align = "center",
+    columns = matches("week|per")
+  ) %>% 
+  # add label spanners across top for current week, last week, two weeks ago
+  # dates dynamically change
+  tab_spanner(
+    label = md(str_c("**Current Week**"," **(",current_week,")**")),
+    columns = contains("current")
+  ) %>% 
+  tab_spanner(
+    label = md(str_c("**Last Week**"," **(",last_week,")**")),
+    columns = contains("last")
+  ) %>% 
+  tab_spanner(
+    label = md(str_c("**Two Weeks Ago**"," **(",two_weeks_ago,")**")),
+    columns = contains("two")
+  ) %>% 
+  tab_spanner(
+    label = md(str_c("**Three Weeks Ago**"," **(",three_weeks_ago,")**")),
+    columns = contains("three")
+  ) %>% 
+  # rename columns to Count or %
+  # need if else statements because some columns not present in data
+  { if("current_week" %in% names(.[["_data"]])) 
+    cols_label(., current_week = "Count", current_week_per = "%") 
+    else .} %>%
+  { if("last_week" %in% names(.[["_data"]])) 
+    cols_label(., last_week = "Count", last_week_per = "%") 
+    else .} %>%
+  { if("two_weeks" %in% names(.[["_data"]])) 
+    cols_label(., two_weeks = "Count", two_weeks_per = "%") 
+    else .} %>% 
+  { if("three_weeks" %in% names(.[["_data"]])) 
+    cols_label(., three_weeks = "Count", three_weeks_per = "%") 
+    else .} %>% 
+  # create summary row of total cases assigned
+  grand_summary_rows(
+    columns = everything(),
+    fns = list(
+      `Total Cases Assigned` = ~sum(.,na.rm = TRUE)
+    ),
+    decimals = 0
+  ) %>% 
+  # color completed interview row green
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "palegreen3")
+      ),
+    locations = cells_stub(rows = "Completed Interview")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "palegreen3"),
+    locations = cells_body(rows = "Completed Interview")
+  ) %>% 
+  # color not attempted interview row red
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "darksalmon")
+      ),
+    locations = cells_stub(rows = "Interview Not Attempted")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "darksalmon"),
+    locations = cells_body(rows = "Interview Not Attempted")
+  ) %>%
+  # format table width, cell padding, row formatting
+  tab_options(
+    table.width = pct(100),
+    data_row.padding = px(5),
+    row_group.font.weight = "bold",
+    grand_summary_row.background.color = "lightblue"
+  )
+```
+
+<div style="margin-bottom:40px;">
+</div>
+
+***
+#### **Contact Tracing**
+**Note:** **`r .x`** monitored **`r ct_phila %>% filter(fup_current == "yes") %>% select(id) %>% n_distinct()`** contacts: **`r ct_phila %>% filter(fup_current == "yes",fup_method_preferred_display == "Call") %>% select(id) %>% n_distinct()`** requested daily calls and **`r ct_phila %>% filter(fup_current == "yes",fup_method_preferred_display == "SMS") %>% select(id) %>% n_distinct()`** requested daily SMS messages. Dates are **not shown** for days during which staff member had no contacts assigned to them.
+
+<div style="margin-bottom:30px;">
+</div>
+
+##### **Table 3.** Contact tracing interview outcomes
+```{r table3, echo=FALSE, results='asis',warning=FALSE}
+ct_phila %>%
+  # filter to cases from current week
+  filter(timeframe == "last_week") %>% 
+  # sort based on interview date
+  arrange(interview_date) %>% 
+  # count number of completed, refused, attempted, etc. interviews by day
+  count(interview_date,interview_disp_recode_ct,.drop = FALSE) %>%
+  # pivot wider so that dates are column names
+  pivot_wider(names_from = interview_date,values_from=n) %>%
+  # format date column names to remove 0s and 
+  rename_with(~replace_na(str_remove_all(format(as_date(.),"%m/%d/%y"),"^0|(?<=/)0"),"Not Investigated"),-interview_disp_recode_ct) %>%
+  rowwise() %>% 
+  # calculate running total by summing across numeric columns
+  mutate("Running Total" = sum(c_across(where(is.numeric)),na.rm=TRUE)) %>% 
+  # convert table to gt table and convert first column to stub column
+  gt(
+    rowname_col = "interview_disp_recode_ct"
+  ) %>% 
+  # format missing values in all columns
+  fmt_missing(
+    columns = everything()
+  ) %>% 
+  # add label spanner above date columns
+  tab_spanner(
+    label = md("**Date Contacts Interviewed**"),
+    columns = contains("\\d+")
+  ) %>% 
+  # create summary row of total cases assigned
+  grand_summary_rows(
+    columns = everything(),
+    fns = list(
+      `Total Contacts Assigned` = ~sum(.,na.rm = TRUE)
+    ),
+    decimals = 0
+  ) %>% 
+  # color completed interview row green -- color stub and body rows separately
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "palegreen3")
+      ),
+    locations = cells_stub(rows = "Completed Interview")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "palegreen3"),
+    locations = cells_body(rows = "Completed Interview")
+  ) %>% 
+  # color not attempted interview row red -- color stub and body rows separately
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "darksalmon")
+      ),
+    locations = cells_stub(rows = "Interview Not Attempted")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "darksalmon"),
+    locations = cells_body(rows = "Interview Not Attempted")
+  ) %>% 
+  # format table width, data padding, row formatting and coloring
+  tab_options(
+    table.width = pct(100),
+    data_row.padding = px(5),
+    grand_summary_row.background.color = "lightblue"
+  )
+```
+
+<div style="margin-bottom:30px;">
+</div>
+
+##### **Table 4.** Contact tracing interview weekly totals. 
+**Note**: Weeks where staff member had no contacts assigned will not show up.
+```{r table4, echo=FALSE, results='asis',warning=FALSE}
+ct_phila %>%
+  count(timeframe,interview_disp_recode_ct,.drop=FALSE) %>%
+  pivot_wider(names_from = timeframe,values_from=n) %>%
+  mutate_at(vars(contains("week")),funs("per" = ./sum(.))) %>% 
+  # rename edge cases where columns are not renamed correctly
+  { if("current_week" %in% names(.) & "per" %in% names(.))
+    rename(., "current_week_per" = per)
+    else .} %>% 
+  { if("last_week" %in% names(.) & "per" %in% names(.))
+    rename(., "last_week_per" = per)
+    else .} %>% 
+  { if("two_weeks" %in% names(.) & "per" %in% names(.))
+    rename(., "two_weeks_per" = per)
+    else .} %>% 
+  { if("three_weeks" %in% names(.) & "per" %in% names(.))
+    rename(., "three_weeks_per" = per)
+    else .} %>%
+  # multiple columns containing "per" by 100
+  mutate(across(contains("per"), ~round(.*100,1))) %>%
+  # reorder columns
+  select(1,contains("current"),contains("last"),contains("two"),contains("three")) %>% 
+  # convert table to gt table and convert first column to stub column
+  gt(
+    rowname_col = "interview_disp_recode_ct"
+  ) %>% 
+  # format missing values in all columns
+  fmt_missing(
+    columns = everything()
+  ) %>% 
+  # center columns
+  cols_align(
+    align = "center",
+    columns = matches("week|per")
+  ) %>% 
+  # add label spanners across top for current week, last week, two weeks ago
+  # dates dynamically change
+  tab_spanner(
+    label = md(str_c("**Current Week**"," **(",current_week,")**")),
+    columns = contains("current")
+  ) %>% 
+  tab_spanner(
+    label = md(str_c("**Last Week**"," **(",last_week,")**")),
+    columns = contains("last")
+  ) %>% 
+  tab_spanner(
+    label = md(str_c("**Two Weeks Ago**"," **(",two_weeks_ago,")**")),
+    columns = contains("two")
+  ) %>% 
+  tab_spanner(
+    label = md(str_c("**Three Weeks Ago**"," **(",three_weeks_ago,")**")),
+    columns = contains("three")
+  ) %>% 
+  # rename columns to Count or %
+  # need if else statements because some columns not present in data
+  { if("current_week" %in% names(.[["_data"]])) 
+    cols_label(., current_week = "Count", current_week_per = "%") 
+    else .} %>%  
+  { if("last_week" %in% names(.[["_data"]])) 
+    cols_label(., last_week = "Count", last_week_per = "%") 
+    else .} %>% 
+  { if("two_weeks" %in% names(.[["_data"]])) 
+    cols_label(., two_weeks = "Count", two_weeks_per = "%") 
+    else .} %>% 
+  { if("three_weeks" %in% names(.[["_data"]])) 
+    cols_label(., three_weeks = "Count", three_weeks_per = "%") 
+    else .} %>% 
+  # create summary row of total cases assigned
+  grand_summary_rows(
+    columns = everything(),
+    fns = list(
+      `Total Contacts Assigned` = ~sum(.,na.rm = TRUE)
+    ),
+    decimals = 0
+  ) %>% 
+  # color completed interview row green
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "palegreen3")
+      ),
+    locations = cells_stub(rows = "Completed Interview")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "palegreen3"),
+    locations = cells_body(rows = "Completed Interview")
+  ) %>% 
+  # color not attempted interview row red
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "darksalmon")
+      ),
+    locations = cells_stub(rows = "Interview Not Attempted")
+  ) %>% 
+  tab_style(
+    style = cell_fill(color = "darksalmon"),
+    locations = cells_body(rows = "Interview Not Attempted")
+  ) %>% 
+  # format table width, data padding, row formatting
+  tab_options(
+    table.width = pct(100),
+    data_row.padding = px(5),
+    grand_summary_row.background.color = "lightblue"
+  )
+```
+
+<div style="margin-bottom:30px;">
+</div>
+
+##### **Table 5.** Contact registration outcomes
+**Note:** **`r .x`** was assigned  **`r nrow(cases)`** cases. **`r  num_registered_contacts`** out of **`r nrow(cases)`** cases had at least 1 registered contact and **`r refused_contacts`** cases refused to provide contacts. 
+
+Differences between **Total Summed Contacts** and **Reported Total Contacts** should be resolved. Reported Total Contacts is calculated based on the questions in the case investigation form. Dates are **not shown** for days during which staff member had no cases assigned to them.
+
+```{r table5, echo=FALSE, results='asis',warning=FALSE}
+t3 %>%
+  pivot_longer(!date_opened, names_to = 'n', values_to = 'count') %>%
+  pivot_wider(names_from = date_opened,values_from=count) %>%
+  rename_with(~replace_na(str_remove_all(format(as_date(.),"%m/%d/%y"),"^0|(?<=/)0"),"Not Investigated"),-n) %>%
+  rowwise() %>%
+  mutate("Running Total" = sum(c_across(where(is.numeric)),na.rm=TRUE)) %>%
+  gt(
+    rowname_col = "n"
+  ) %>%
+  # format missing values in all columns
+  fmt_missing(
+    columns = everything()
+  ) %>%
+  # add label spanner above date columns
+  tab_spanner(
+    label = md("**Date Contacts Interviewed**"),
+    columns = contains("\\d+")
+  ) %>%
+  # color contacts registered row green -- color stub and body rows separately
+  tab_style(
+    style = list(
+      cell_fill(color = "palegreen3")
+    ),
+    locations = cells_stub(rows = "Contacts Registered")
+  ) %>% # color not attempted interview row red -- color stub and body rows separately
+  tab_style(
+    style = list(
+      cell_fill(color = "darksalmon")
+    ),
+    locations = cells_stub(rows = "Contacts Not Registered")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "lightblue")
+    ),
+    locations = cells_stub(rows = "Total Summed Contacts")
+  ) %>%
+  tab_style(
+    style = cell_fill(color = "lightblue"),
+    locations = cells_body(rows = "Total Summed Contacts")
+  )  %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "lightblue")
+    ),
+    locations = cells_stub(rows = "Reported Total Contacts")
+  ) %>%
+  tab_options(
+    table.width = pct(100),
+    data_row.padding = px(5)
+  )
+```
+
+<div style="margin-bottom:50px;">
+</div>
